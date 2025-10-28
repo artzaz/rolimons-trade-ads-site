@@ -1,20 +1,63 @@
 import json
 import random
 import time
+import logging
+from typing import Dict, List
 import requests
-from rich import print
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from rich.logging import RichHandler
 
-def load_config():
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[RichHandler(rich_tracebacks=True)]
+)
+logger = logging.getLogger("rolimons")
+
+class ConfigError(Exception):
+    """Custom exception for configuration errors"""
+    pass
+
+def load_config() -> Dict:
+    """Load and validate configuration from config.json"""
     try:
         with open("config.json", encoding="utf-8") as f:
             config = json.load(f)
+        
+        # Validate required fields
+        required_fields = ["roli_verification", "player_id", "trade_ads", "min_delay", "max_delay"]
+        missing_fields = [field for field in required_fields if not config.get(field)]
+        if missing_fields:
+            raise ConfigError(f"Missing required config fields: {', '.join(missing_fields)}")
+        
+        # Validate player_id format
+        try:
+            config["player_id"] = int(config["player_id"])
+        except ValueError:
+            raise ConfigError("player_id must be a valid integer")
+            
         return config
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"[bold red]ERROR[/] Failed to load config: {e}")
-        raise
+        logger.error(f"Failed to load config: {e}")
+        raise ConfigError(f"Failed to load config: {e}")
 
-def initialize_session(verification_token):
+def initialize_session(verification_token: str) -> requests.Session:
+    """Initialize a requests session with retry mechanism"""
     session = requests.Session()
+    
+    # Configure retry strategy
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504]
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         "Accept": "application/json",
@@ -22,7 +65,15 @@ def initialize_session(verification_token):
     session.cookies.update({"_RoliVerification": verification_token})
     return session
 
-def post_ad(session, player_id, offer_items, request_items, request_tags, ad_number):
+def post_ad(
+    session: requests.Session,
+    player_id: int,
+    offer_items: List[int],
+    request_items: List[int],
+    request_tags: List[str],
+    ad_name: str
+) -> bool:
+    """Post a trade advertisement"""
     payload = {
         "player_id": player_id,
         "offer_item_ids": offer_items,
@@ -30,9 +81,10 @@ def post_ad(session, player_id, offer_items, request_items, request_tags, ad_num
         "request_tags": request_tags
     }
     
-    print(f"\n[bold]Sending Trade Ad #{ad_number}:[/]")
-    print(f"➤ Offering: {offer_items}")
-    print(f"➤ Requesting: {request_items if request_items else 'Anything'} ({', '.join(request_tags) if request_tags else 'No tags'})")
+    logger.info(f"\nPosting Trade Ad: {ad_name}")
+    logger.info(f"➤ Offering: {offer_items}")
+    logger.info(f"➤ Requesting: {request_items if request_items else 'Anything'} "
+               f"({', '.join(request_tags) if request_tags else 'No tags'})")
     
     try:
         response = session.post(
@@ -42,77 +94,56 @@ def post_ad(session, player_id, offer_items, request_items, request_tags, ad_num
         )
         response.raise_for_status()
         res = response.json()
-    except (requests.RequestException, ValueError) as e:
-        print(f"[bold red]ERROR[/] API request failed: {e}")
+    except requests.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        return False
+    except ValueError as e:
+        logger.error(f"Invalid JSON response: {e}")
         return False
 
     if res.get("success"):
-        print(f"[bold green]SUCCESS[/] Ad #{ad_number} posted successfully!")
+        logger.info(f"Ad '{ad_name}' posted successfully!")
         return True
     
-    print(f'[bold red]ERROR[/] Failed to post Ad #{ad_number}: {res.get("message", "Unknown error")}')
+    logger.error(f"Failed to post '{ad_name}': {res.get('message', 'Unknown error')}")
     return False
 
 def main():
+    """Main execution function"""
     try:
         config = load_config()
-        session = initialize_session(config.get("roli_verification"))
-        player_id = int(config.get("player_id"))
-        
-        # Define two different trade ads
-        trade_ads = [
-            {
-                "offer_items": [1048037, 1048037, 1048037, 564449640],  # Replace with your items
-                "request_items": [],  # No specific request
-                "request_tags": ["upgrade", "downgrade"],
-                "name": "Ad 1 - Upgrades/Downgrades"
-            },
-            {
-                "offer_items": [564449640, 9255011, 9255011, 9255011],  # Replace with different items
-                "request_items": [],  # Requesting a specific item
-                "request_tags": ["upgrade", "downgrade"],
-                "name": "Ad 2 - Upgrades/Downgrades"
-            },
-            {
-                 "offer_items": [162066176],  # Replace with different items
-                "request_items": [],  # Requesting a specific item
-                "request_tags": ["upgrade", "downgrade"],
-                "name": "Ad 2 - Upgrades/Downgrades"
-            }
-        ]
-        
-        min_delay = 15  # minutes
-        max_delay = 15  # minutes
+        session = initialize_session(config["roli_verification"])
         
         ad_counter = 0
         
         while True:
-            current_ad = trade_ads[ad_counter % len(trade_ads)]  # Alternate between ads
+            current_ad = config["trade_ads"][ad_counter % len(config["trade_ads"])]
             
             success = post_ad(
-                session,
-                player_id,
-                current_ad["offer_items"],
-                current_ad["request_items"],
-                current_ad["request_tags"],
-                current_ad["name"]
+                session=session,
+                player_id=config["player_id"],
+                offer_items=current_ad["offer_items"],
+                request_items=current_ad["request_items"],
+                request_tags=current_ad["request_tags"],
+                ad_name=current_ad["name"]
             )
             
-            # Adjust delay based on success/failure
             delay_minutes = random.randint(
-                min_delay if success else min_delay * 1,
-                max_delay if success else max_delay * 1
+                config["min_delay"] if success else config["min_delay"] * 2,
+                config["max_delay"] if success else config["max_delay"] * 2
             )
             
-            print(f"\n[bold]Waiting {delay_minutes} minutes before next ad...[/]")
+            logger.info(f"\nWaiting {delay_minutes} minutes before next ad...")
             time.sleep(delay_minutes * 60)
             
-            ad_counter += 1  # Move to next ad
+            ad_counter += 1
             
     except KeyboardInterrupt:
-        print("\n[bold yellow]Script stopped by user[/]")
+        logger.warning("\nScript stopped by user")
+    except ConfigError as e:
+        logger.error(f"Configuration error: {e}")
     except Exception as e:
-        print(f"[bold red]Fatal error:[/] {e}")
+        logger.exception(f"Fatal error: {e}")
 
 if __name__ == "__main__":
     main()
