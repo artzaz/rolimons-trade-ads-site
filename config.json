@@ -1,4 +1,14 @@
 {
-    "roli_verification": "your roli_verification",
-    "player_id": "your player id"
+    "roli_verification": "your_verification",
+    "player_id": "your_id",
+    "trade_ads": [
+        {
+            "offer_items": [162066176, 9255011],
+            "request_items": [],
+            "request_tags": ["upgrade", "downgrade"],
+            "name": "Ad 1 - Upgrades/Downgrades"
+        }
+    ],
+    "min_delay": 15,
+    "max_delay": 15
 }
